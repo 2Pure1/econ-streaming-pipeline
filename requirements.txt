@@ -1,0 +1,6 @@
+apache-airflow
+pyspark==3.5.0
+delta-spark==3.0.0
+loguru
+requests
+confluent-kafka

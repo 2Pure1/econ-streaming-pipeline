@@ -1,0 +1,203 @@
+version: "3.8"
+
+# econ-streaming-pipeline infrastructure
+# Starts: Zookeeper, Kafka, Schema Registry, Kafka UI, Spark master + worker
+#
+# Run: docker compose up -d
+# Kafka UI:     http://localhost:8090
+# Spark UI:     http://localhost:8091
+# Schema Reg:   http://localhost:8081
+
+services:
+
+  # ── Zookeeper (Kafka coordination) ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: econ-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - streaming_network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka broker ───────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: econ-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"       # external access from host
+      - "29092:29092"     # internal Docker network access
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168        # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824   # 1 GB
+      KAFKA_NUM_PARTITIONS: 3
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - streaming_network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ── Schema Registry (Avro schema management) ───────────────────────────────
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: econ-schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    networks:
+      - streaming_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  # ── Kafka UI (browse topics, messages, consumer groups) ────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: econ-kafka-ui
+    depends_on:
+      - kafka
+      - schema-registry
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: econ-streaming
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_METRICS_PORT: 9997
+    networks:
+      - streaming_network
+
+  # ── Kafka topic initialisation ─────────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: econ-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - streaming_network
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      echo 'Waiting for Kafka...'
+      sleep 15
+
+      echo 'Creating topics...'
+
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic econ.releases.raw \
+        --partitions 3 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic econ.releases.enriched \
+        --partitions 3 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic econ.releases.anomalies \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config retention.ms=2592000000
+
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+        --topic econ.releases.dlq \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config retention.ms=2592000000
+
+      echo 'Topics created:'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+    restart: "no"
+
+  # ── Spark master ───────────────────────────────────────────────────────────
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: econ-spark-master
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "8091:8080"    # Spark UI
+      - "7077:7077"    # Spark master port
+    volumes:
+      - ./spark:/opt/spark-apps          # mount our Spark jobs
+      - spark_checkpoint:/tmp/checkpoints
+      - delta_lake:/tmp/delta_lake
+    networks:
+      - streaming_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  # ── Spark worker ───────────────────────────────────────────────────────────
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: econ-spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+    volumes:
+      - ./spark:/opt/spark-apps
+      - spark_checkpoint:/tmp/checkpoints
+      - delta_lake:/tmp/delta_lake
+    networks:
+      - streaming_network
+
+volumes:
+  zookeeper_data:
+  zookeeper_logs:
+  kafka_data:
+  spark_checkpoint:
+  delta_lake:
+
+networks:
+  streaming_network:
+    driver: bridge
+  # Also connect to the econ-data-pipeline network for PostgreSQL access
