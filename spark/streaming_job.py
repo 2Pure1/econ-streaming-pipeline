@@ -22,9 +22,9 @@ Checkpointing:
 Run locally (against Docker Spark):
     spark-submit \
       --master spark://localhost:7077 \
-      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,\
-                 io.delta:delta-spark_2.12:3.0.0,\
-                 org.postgresql:postgresql:42.6.0 \
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.0-preview2,\
+                 io.delta:delta-spark_2.13:4.0.0,\
+                 org.postgresql:postgresql:42.7.4 \
       spark/streaming_job.py
 
 Run in Docker Spark container:

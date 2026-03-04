@@ -1,6 +1,6 @@
 apache-airflow
-pyspark==3.5.0
-delta-spark==3.0.0
+pyspark==4.1.1
+delta-spark==4.1.0
 loguru
 requests
 confluent-kafka

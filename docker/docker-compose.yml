@@ -147,10 +147,13 @@ services:
 
   # ── Spark master ───────────────────────────────────────────────────────────
   spark-master:
-    image: bitnami/spark:3.5
+    image: apache/spark:4.1.1-scala2.13-java17-python3-ubuntu
     container_name: econ-spark-master
+    user: root
     environment:
       SPARK_MODE: master
+      SPARK_HOME: /opt/spark
+      PATH: /opt/spark/bin:/opt/spark/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       SPARK_RPC_AUTHENTICATION_ENABLED: "no"
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
       SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
@@ -159,11 +162,13 @@ services:
       - "8091:8080"    # Spark UI
       - "7077:7077"    # Spark master port
     volumes:
-      - ./spark:/opt/spark-apps          # mount our Spark jobs
+      - ../spark:/opt/spark-apps          # mount our Spark jobs
       - spark_checkpoint:/tmp/checkpoints
       - delta_lake:/tmp/delta_lake
     networks:
       - streaming_network
+      - econ-net
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 20s
@@ -172,23 +177,28 @@ services:
 
   # ── Spark worker ───────────────────────────────────────────────────────────
   spark-worker:
-    image: bitnami/spark:3.5
+    image: apache/spark:4.1.1-scala2.13-java17-python3-ubuntu
     container_name: econ-spark-worker
+    user: root
     depends_on:
       - spark-master
     environment:
       SPARK_MODE: worker
+      SPARK_HOME: /opt/spark
+      PATH: /opt/spark/bin:/opt/spark/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_WORKER_MEMORY: 2G
       SPARK_WORKER_CORES: 2
       SPARK_RPC_AUTHENTICATION_ENABLED: "no"
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
     volumes:
-      - ./spark:/opt/spark-apps
+      - ../spark:/opt/spark-apps
       - spark_checkpoint:/tmp/checkpoints
       - delta_lake:/tmp/delta_lake
     networks:
       - streaming_network
+      - econ-net
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
 
 volumes:
   zookeeper_data:
@@ -200,4 +210,7 @@ volumes:
 networks:
   streaming_network:
     driver: bridge
+  econ-net:
+    external: true
+    name: docker_econ-net
   # Also connect to the econ-data-pipeline network for PostgreSQL access
